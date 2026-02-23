@@ -1,4 +1,5 @@
 import type { PartResult } from "./types";
+import { searchRockAutoParts } from "./parts-finder-rockauto";
 
 const EBAY_APP_ID = process.env.EBAY_APP_ID || "";
 const EBAY_AFFILIATE_ID = process.env.EBAY_AFFILIATE_ID || "";
@@ -193,11 +194,15 @@ async function scrapeRockAutoPrice(
 }
 
 export async function searchRockAuto(
+  damageId: string,
   partName: string,
   year: string | number,
   make: string,
   model: string
 ): Promise<PartResult[]> {
+  const apiResults = await searchRockAutoParts(damageId, partName, { year, make, model });
+  if (apiResults.length > 0) return apiResults;
+
   // RockAuto catalog URLs: /en/catalog/{make},{year},{model},{engine}/{category}/{subcategory}
   // We build the vehicle path and deep-link to the right category
   const makeFmt = make.toLowerCase().replace(/\s+/g, "+");
@@ -320,7 +325,7 @@ export async function findParts(
   // Search all sources in parallel
   const [ebayResults, rockAutoResults] = await Promise.allSettled([
     searchEbayParts(partName, year, make, model),
-    searchRockAuto(partName, year, make, model),
+    searchRockAuto(damageId, partName, year, make, model),
   ]);
 
   const allResults: PartResult[] = [
