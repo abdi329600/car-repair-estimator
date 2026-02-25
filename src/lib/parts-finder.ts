@@ -1,9 +1,52 @@
 import type { PartResult } from "./types";
-import { searchRockAutoParts } from "./parts-finder-rockauto";
 
 const EBAY_APP_ID = process.env.EBAY_APP_ID || "";
 const EBAY_AFFILIATE_ID = process.env.EBAY_AFFILIATE_ID || "";
 const EBAY_CAMPAIGN_ID = process.env.EBAY_CAMPAIGN_ID || "";
+
+// ─── Junk title filter ───────────────────────────────────────────────────────
+
+const JUNK_KEYWORDS = [
+  "for parts", "for repair", "broken", "damaged", "cracked",
+  "read desc", "as is", "shell only", "empty", "no bulb",
+  "core only", "incomplete", "for rebuild", "non-working",
+];
+
+function isJunkListing(title: string): boolean {
+  const lower = title.toLowerCase();
+  return JUNK_KEYWORDS.some(kw => lower.includes(kw));
+}
+
+function computeMedian(prices: number[]): number {
+  if (prices.length === 0) return 0;
+  const sorted = [...prices].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1] + sorted[mid]) / 2
+    : sorted[mid];
+}
+
+// ─── Estimated price table (fallback when eBay unavailable) ─────────────────
+
+const ESTIMATED_PRICES: Record<string, number> = {
+  "front bumper": 185, "rear bumper": 160, "bumper cover": 175,
+  "bumper reinforcement": 120, "headlight": 145, "headlamp": 145,
+  "taillight": 120, "tail light": 120, "fog light": 65,
+  "turn signal": 55, "hood": 380, "fender": 220, "door": 340,
+  "trunk": 260, "grille": 95, "windshield": 310, "window": 185,
+  "mirror": 115, "radiator": 275, "condenser": 195,
+  "strut": 165, "shock": 120, "control arm": 145,
+  "engine": 1800, "alternator": 195, "starter": 145,
+  "brake pad": 55, "brake rotor": 85, "seat": 210, "dashboard": 480,
+};
+
+function getEstimatedPartPrice(partName: string): number {
+  const lower = partName.toLowerCase();
+  for (const [key, val] of Object.entries(ESTIMATED_PRICES)) {
+    if (lower.includes(key)) return val;
+  }
+  return 150;
+}
 
 // ─── eBay Finding API (free, affiliate revenue) ───
 
@@ -18,17 +61,17 @@ interface EbaySearchItem {
   listingInfo?: { listingType: string[] }[];
 }
 
-export async function searchEbayParts(
+// ─── eBay median price engine ────────────────────────────────────────────────
+
+export async function getEbayMedianPrice(
   partName: string,
   year: string | number,
   make: string,
   model: string
-): Promise<PartResult[]> {
-  if (!EBAY_APP_ID) return [];
+): Promise<{ price: number; confidence: PartResult["confidence"]; listings: PartResult[] }> {
+  if (!EBAY_APP_ID) return { price: 0, confidence: "low", listings: [] };
 
   const keywords = `${year} ${make} ${model} ${partName}`.trim();
-  const categoryId = "6030"; // eBay Motors > Parts & Accessories
-
   try {
     const url = new URL("https://svcs.ebay.com/services/search/FindingService/v1");
     url.searchParams.set("OPERATION-NAME", "findItemsByKeywords");
@@ -37,46 +80,46 @@ export async function searchEbayParts(
     url.searchParams.set("RESPONSE-DATA-FORMAT", "JSON");
     url.searchParams.set("REST-PAYLOAD", "true");
     url.searchParams.set("keywords", keywords);
-    url.searchParams.set("categoryId", categoryId);
+    url.searchParams.set("categoryId", "6030");
     url.searchParams.set("sortOrder", "PricePlusShippingLowest");
-    url.searchParams.set("paginationInput.entriesPerPage", "8");
-    // Affiliate tracking
+    url.searchParams.set("paginationInput.entriesPerPage", "20");
     if (EBAY_AFFILIATE_ID) {
       url.searchParams.set("affiliate.networkId", "9");
       url.searchParams.set("affiliate.trackingId", EBAY_AFFILIATE_ID);
       url.searchParams.set("affiliate.customId", EBAY_CAMPAIGN_ID || "autoflip");
     }
 
-    const res = await fetch(url.toString(), {
-      headers: { "Accept": "application/json" },
-      next: { revalidate: 3600 }, // cache 1 hour
-    });
-
-    if (!res.ok) return [];
+    const res = await fetch(url.toString(), { headers: { "Accept": "application/json" } });
+    if (!res.ok) return { price: 0, confidence: "low", listings: [] };
     const data = await res.json();
-
     const items: EbaySearchItem[] =
       data?.findItemsByKeywordsResponse?.[0]?.searchResult?.[0]?.item || [];
 
-    return items.map((item): PartResult => {
+    const goodListings: PartResult[] = [];
+    const goodPrices: number[] = [];
+
+    for (const item of items) {
+      const title = item.title?.[0] || "";
+      if (isJunkListing(title)) continue;
       const price = parseFloat(item.sellingStatus?.[0]?.currentPrice?.[0]?.__value__ || "0");
       const shipping = parseFloat(item.shippingInfo?.[0]?.shippingServiceCost?.[0]?.__value__ || "0");
+      const total = price + shipping;
+      if (total <= 0) continue;
       const conditionRaw = item.condition?.[0]?.conditionDisplayName?.[0] || "New";
       const condition: PartResult["condition"] =
         conditionRaw.toLowerCase().includes("used") ? "used"
         : conditionRaw.toLowerCase().includes("reman") ? "remanufactured"
         : "new";
-
       const viewUrl = item.viewItemURL?.[0] || "";
-      // Build affiliate URL
       const affiliateUrl = EBAY_CAMPAIGN_ID
         ? `https://rover.ebay.com/rover/1/${EBAY_AFFILIATE_ID}/1?mpre=${encodeURIComponent(viewUrl)}&campid=${EBAY_CAMPAIGN_ID}&toolid=10001`
         : viewUrl;
-
-      return {
+      goodPrices.push(total);
+      goodListings.push({
         id: item.itemId?.[0] || crypto.randomUUID(),
-        name: item.title?.[0] || partName,
-        price,
+        name: title,
+        price: total,
+        price_source: "live",
         vendor: "ebay",
         url: viewUrl,
         image_url: item.galleryURL?.[0] || undefined,
@@ -84,15 +127,30 @@ export async function searchEbayParts(
         availability: "in_stock",
         condition,
         affiliate_url: affiliateUrl,
-      };
-    });
+      });
+    }
+
+    const medianPrice = computeMedian(goodPrices);
+    const confidence: PartResult["confidence"] =
+      goodPrices.length >= 6 ? "high" : goodPrices.length >= 3 ? "medium" : "low";
+    return { price: medianPrice, confidence, listings: goodListings };
   } catch (e) {
-    console.error("eBay search failed:", e);
-    return [];
+    console.error("[ebay-median] failed:", e);
+    return { price: 0, confidence: "low", listings: [] };
   }
 }
 
-// ─── RockAuto (catalog URL construction — no API needed) ───
+export async function searchEbayParts(
+  partName: string,
+  year: string | number,
+  make: string,
+  model: string
+): Promise<PartResult[]> {
+  const { listings } = await getEbayMedianPrice(partName, year, make, model);
+  return listings;
+}
+
+// ─── RockAuto (browse link + table estimate — no scraping) ───
 
 // Map damage/part names to RockAuto catalog category paths
 const ROCKAUTO_CATEGORY_MAP: Record<string, { category: string; subcategory: string; label: string }> = {
@@ -147,145 +205,36 @@ function matchRockAutoCategory(partName: string): { category: string; subcategor
   return null;
 }
 
-// Scrape actual prices from RockAuto HTML
-async function scrapeRockAutoPrice(
-  catalogUrl: string
-): Promise<{ prices: number[]; brand?: string } | null> {
-  try {
-    const res = await fetch(catalogUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml",
-        "Accept-Language": "en-US,en;q=0.9",
-      },
-      signal: AbortSignal.timeout(12000),
-    });
-
-    if (!res.ok) {
-      console.warn(`[parts-scraper] RockAuto returned ${res.status}`);
-      return null;
-    }
-
-    const html = await res.text();
-
-    // RockAuto uses consistent price patterns in their HTML
-    // Look for price spans: $XX.XX format
-    const priceMatches = html.match(/\$(\d{1,4}\.\d{2})/g);
-    if (!priceMatches || priceMatches.length === 0) return null;
-
-    // Parse all prices, filter out obviously wrong ones (shipping, tax, etc.)
-    const prices = priceMatches
-      .map(p => parseFloat(p.replace("$", "")))
-      .filter(p => p >= 5 && p <= 10000) // reasonable part price range
-      .sort((a, b) => a - b);
-
-    if (prices.length === 0) return null;
-
-    // Try to extract a brand name near the first price
-    const brandMatch = html.match(/class="listing-text-row-brand[^"]*"[^>]*>([^<]+)</);
-    const brand = brandMatch?.[1]?.trim();
-
-    console.log(`[parts-scraper] RockAuto found ${prices.length} prices, cheapest: $${prices[0]}`);
-    return { prices, brand };
-  } catch (e) {
-    console.warn("[parts-scraper] RockAuto scrape failed:", e);
-    return null;
-  }
-}
-
-export async function searchRockAuto(
-  damageId: string,
+export function getRockAutoBrowseResult(
   partName: string,
   year: string | number,
   make: string,
   model: string
-): Promise<PartResult[]> {
-  const apiResults = await searchRockAutoParts(damageId, partName, { year, make, model });
-  if (apiResults.length > 0) return apiResults;
-
-  // RockAuto catalog URLs: /en/catalog/{make},{year},{model},{engine}/{category}/{subcategory}
-  // We build the vehicle path and deep-link to the right category
+): PartResult {
   const makeFmt = make.toLowerCase().replace(/\s+/g, "+");
   const modelFmt = model.toLowerCase().replace(/\s+/g, "+");
   const vehiclePath = `${makeFmt},${year},${modelFmt}`;
-
   const matched = matchRockAutoCategory(partName);
-
-  let catalogUrl: string;
-  let displayName: string;
-
-  if (matched) {
-    catalogUrl = `https://www.rockauto.com/en/catalog/${vehiclePath},${matched.category},${matched.subcategory}`;
-    displayName = `${matched.label} — RockAuto (${year} ${make} ${model})`;
-  } else {
-    catalogUrl = `https://www.rockauto.com/en/catalog/${vehiclePath}`;
-    displayName = `${partName} — Browse RockAuto (${year} ${make} ${model})`;
-  }
-
-  const results: PartResult[] = [];
-
-  // Try to scrape actual prices
-  if (matched) {
-    const scraped = await scrapeRockAutoPrice(catalogUrl);
-    if (scraped && scraped.prices.length > 0) {
-      // Add cheapest aftermarket option
-      results.push({
-        id: `rockauto-${partName.replace(/\s/g, "-").toLowerCase()}-cheap`,
-        name: `${matched.label} (Aftermarket${scraped.brand ? ` — ${scraped.brand}` : ""})`,
-        price: scraped.prices[0],
-        vendor: "rockauto",
-        url: catalogUrl,
-        shipping: 0,
-        availability: "in_stock",
-        condition: "new",
-      });
-
-      // Add mid-range option if enough prices
-      if (scraped.prices.length >= 3) {
-        const midIdx = Math.floor(scraped.prices.length / 2);
-        results.push({
-          id: `rockauto-${partName.replace(/\s/g, "-").toLowerCase()}-mid`,
-          name: `${matched.label} (Mid-Range)`,
-          price: scraped.prices[midIdx],
-          vendor: "rockauto",
-          url: catalogUrl,
-          shipping: 0,
-          availability: "in_stock",
-          condition: "new",
-        });
-      }
-    }
-  }
-
-  // Always add a browse link (even if scraping succeeded, user may want to see all options)
-  results.push({
+  const catalogUrl = matched
+    ? `https://www.rockauto.com/en/catalog/${vehiclePath},${matched.category},${matched.subcategory}`
+    : `https://www.rockauto.com/en/catalog/${vehiclePath}`;
+  const label = matched?.label || partName;
+  return {
     id: `rockauto-${partName.replace(/\s/g, "-").toLowerCase()}`,
-    name: displayName,
-    price: 0,
+    name: `${label} — RockAuto (${year} ${make} ${model})`,
+    price: getEstimatedPartPrice(partName),
+    price_source: "estimated",
+    confidence: "medium",
+    note: "Est. price — click to browse exact pricing on RockAuto",
     vendor: "rockauto",
     url: catalogUrl,
     shipping: 0,
     availability: "in_stock",
     condition: "new",
-  });
-
-  // Google Shopping as backup
-  const googleUrl = `https://www.google.com/search?tbm=shop&q=${encodeURIComponent(`${year} ${make} ${model} ${partName}`)}`;
-  results.push({
-    id: `google-${partName.replace(/\s/g, "-").toLowerCase()}`,
-    name: `${partName} — Google Shopping`,
-    price: 0,
-    vendor: "google",
-    url: googleUrl,
-    shipping: 0,
-    availability: "unknown",
-    condition: "new",
-  });
-
-  return results;
+  };
 }
 
-// ─── Multi-source search with caching ───
+// ─── Multi-source search with in-memory cache + in-flight dedup ──────────────
 
 export interface PartsSearchResult {
   part_name: string;
@@ -294,11 +243,80 @@ export interface PartsSearchResult {
   cheapest?: PartResult;
   fastest?: PartResult;
   cached: boolean;
+  ebay_median?: number;
+  ebay_confidence?: PartResult["confidence"];
 }
 
-// In-memory cache (in production, use Supabase parts_cache table)
-const partsCache = new Map<string, { results: PartResult[]; timestamp: number }>();
-const CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+const LIVE_TTL = 12 * 60 * 60 * 1000; // 12h — eBay live data
+const EST_TTL  =  7 * 24 * 60 * 60 * 1000; // 7d  — estimated-only data
+
+const partsCache = new Map<string, { result: PartsSearchResult; expiresAt: number }>();
+const inFlight   = new Map<string, Promise<PartsSearchResult>>();
+
+function priceKey(year: string | number, make: string, model: string, partName: string): string {
+  return `parts:${year}:${make}:${model}:${partName}`.toLowerCase().replace(/\s+/g, "_");
+}
+
+async function _fetchParts(
+  partName: string,
+  year: string | number,
+  make: string,
+  model: string,
+  damageId: string
+): Promise<PartsSearchResult> {
+  const { price: medianPrice, confidence, listings: ebayListings } =
+    await getEbayMedianPrice(partName, year, make, model);
+
+  const rockauto = getRockAutoBrowseResult(partName, year, make, model);
+
+  const allResults: PartResult[] = [];
+
+  // eBay median summary card (if we got a valid median)
+  if (medianPrice > 0) {
+    allResults.push({
+      id: `ebay-median-${damageId}`,
+      name: `${partName} — eBay Market Price`,
+      price: Math.round(medianPrice * 100) / 100,
+      price_source: "live",
+      confidence,
+      note: `Median of ${ebayListings.length} listings after filtering junk`,
+      vendor: "ebay",
+      url: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(`${year} ${make} ${model} ${partName}`)}&_sacat=6030`,
+      shipping: 0,
+      availability: "in_stock",
+      condition: "new",
+    });
+  }
+
+  // RockAuto estimated browse link
+  allResults.push(rockauto);
+
+  // Top individual eBay listings (up to 5)
+  allResults.push(...ebayListings.map(r => ({ ...r, confidence })).slice(0, 5));
+
+  const pricedLive = allResults.filter(r => r.price > 0 && r.price_source === "live");
+  const pricedEst  = allResults.filter(r => r.price > 0 && r.price_source === "estimated");
+  const sorted = [...pricedLive, ...pricedEst].sort((a, b) => a.price - b.price);
+
+  const result: PartsSearchResult = {
+    part_name: partName,
+    damage_id: damageId,
+    results: allResults,
+    cheapest: sorted[0],
+    fastest: sorted.find(r => r.availability === "in_stock"),
+    cached: false,
+    ebay_median: medianPrice > 0 ? Math.round(medianPrice * 100) / 100 : undefined,
+    ebay_confidence: medianPrice > 0 ? confidence : undefined,
+  };
+
+  const ttl = medianPrice > 0 ? LIVE_TTL : EST_TTL;
+  partsCache.set(priceKey(year, make, model, partName), {
+    result,
+    expiresAt: Date.now() + ttl,
+  });
+
+  return result;
+}
 
 export async function findParts(
   partName: string,
@@ -307,49 +325,27 @@ export async function findParts(
   model: string,
   damageId: string
 ): Promise<PartsSearchResult> {
-  const cacheKey = `${year}-${make}-${model}-${partName}`.toLowerCase();
-  const cached = partsCache.get(cacheKey);
+  const key = priceKey(year, make, model, partName);
 
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    const sorted = [...cached.results].sort((a, b) => (a.price || 999999) - (b.price || 999999));
-    return {
-      part_name: partName,
-      damage_id: damageId,
-      results: cached.results,
-      cheapest: sorted.find(r => r.price > 0),
-      fastest: sorted.find(r => r.availability === "in_stock" && r.price > 0),
-      cached: true,
-    };
+  // Serve from cache if fresh
+  const cached = partsCache.get(key);
+  if (cached && Date.now() < cached.expiresAt) {
+    return { ...cached.result, cached: true };
+  }
+  partsCache.delete(key);
+
+  // Deduplicate concurrent requests for the same part
+  if (inFlight.has(key)) {
+    return inFlight.get(key)!;
   }
 
-  // Search all sources in parallel
-  const [ebayResults, rockAutoResults] = await Promise.allSettled([
-    searchEbayParts(partName, year, make, model),
-    searchRockAuto(damageId, partName, year, make, model),
-  ]);
-
-  const allResults: PartResult[] = [
-    ...(ebayResults.status === "fulfilled" ? ebayResults.value : []),
-    ...(rockAutoResults.status === "fulfilled" ? rockAutoResults.value : []),
-  ];
-
-  // Cache results
-  partsCache.set(cacheKey, { results: allResults, timestamp: Date.now() });
-
-  const pricedResults = allResults.filter(r => r.price > 0);
-  const sorted = [...pricedResults].sort((a, b) => a.price - b.price);
-
-  return {
-    part_name: partName,
-    damage_id: damageId,
-    results: allResults,
-    cheapest: sorted[0],
-    fastest: sorted.find(r => r.availability === "in_stock"),
-    cached: false,
-  };
+  const promise = _fetchParts(partName, year, make, model, damageId)
+    .finally(() => inFlight.delete(key));
+  inFlight.set(key, promise);
+  return promise;
 }
 
-// ─── Batch search for all damage items ───
+// ─── Batch search for all damage items ───────────────────────────────────────
 
 export async function findAllParts(
   damages: { damage_id: string; part_name: string }[],
@@ -357,7 +353,6 @@ export async function findAllParts(
   make: string,
   model: string
 ): Promise<PartsSearchResult[]> {
-  // Run searches in parallel, max 3 concurrent to avoid rate limits
   const results: PartsSearchResult[] = [];
   const batchSize = 3;
 

@@ -70,6 +70,7 @@ export async function searchRockAutoParts(
       id: `rockauto-api-${damageId}-${index}`,
       name: part.name || partName,
       price: Number(part.price) || 0,
+      price_source: "live",
       vendor: "rockauto",
       url: part.url || ROCKAUTO_API_URL,
       shipping: 0,

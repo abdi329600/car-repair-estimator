@@ -31,6 +31,9 @@ export interface PartResult {
   id: string;
   name: string;
   price: number;
+  price_source: "live" | "estimated" | "none";
+  confidence?: "high" | "medium" | "low";
+  note?: string;
   vendor: "ebay" | "rockauto" | "partsgeek" | "google" | "generic";
   url: string;
   image_url?: string;

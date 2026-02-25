@@ -707,27 +707,46 @@ export default function Home() {
                 {partsResults.map((pr, i) => (
                   <div key={i} className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
                     <div className="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
-                      <span className="text-sm font-semibold text-white">{pr.part_name}</span>
+                      <div>
+                        <span className="text-sm font-semibold text-white">{pr.part_name}</span>
+                        {pr.ebay_median && pr.ebay_median > 0 && (
+                          <span className="ml-2 text-[10px] bg-blue-900/40 text-blue-400 border border-blue-800/50 px-1.5 py-0.5 rounded font-semibold">
+                            eBay median {fmt(pr.ebay_median)}
+                            {pr.ebay_confidence === "high" ? " ✅" : pr.ebay_confidence === "medium" ? " ~" : " ⚠"}
+                          </span>
+                        )}
+                      </div>
                       {pr.cheapest && <span className="text-xs font-mono font-bold text-green-400">Best: {fmt(pr.cheapest.price)}</span>}
                     </div>
                     {pr.results.length > 0 ? (
                       <div className="divide-y divide-zinc-800/50">
-                        {pr.results.slice(0, 4).map((part, j) => (
+                        {pr.results.slice(0, 5).map((part, j) => (
                           <div key={j} className="flex items-center gap-3 px-5 py-3 hover:bg-zinc-800/30 transition">
                             {part.image_url && <img src={part.image_url} alt="" className="w-12 h-12 rounded-lg object-cover border border-zinc-700 shrink-0" />}
                             <div className="flex-1 min-w-0">
                               <div className="text-xs text-zinc-300 truncate">{part.name}</div>
-                              <div className="flex items-center gap-2 mt-0.5">
-                                <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${part.vendor === "ebay" ? "bg-blue-900/50 text-blue-400" : part.vendor === "google" ? "bg-red-900/50 text-red-400" : "bg-yellow-900/50 text-yellow-400"}`}>{part.vendor}</span>
+                              <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                                {/* Price source badge */}
+                                {part.price_source === "live" && (
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded font-bold bg-green-900/50 text-green-400 border border-green-800/50">✅ Live</span>
+                                )}
+                                {part.price_source === "estimated" && (
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded font-bold bg-yellow-900/40 text-yellow-400 border border-yellow-800/50">~ Est.</span>
+                                )}
+                                {part.price_source === "none" && (
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded font-bold bg-zinc-800 text-zinc-500">Link</span>
+                                )}
+                                <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${part.vendor === "ebay" ? "bg-blue-900/50 text-blue-400" : "bg-yellow-900/50 text-yellow-400"}`}>{part.vendor}</span>
                                 <span className={`text-[10px] px-1.5 py-0.5 rounded ${part.condition === "new" ? "bg-green-900/50 text-green-400" : part.condition === "used" ? "bg-zinc-700 text-zinc-400" : "bg-purple-900/50 text-purple-400"}`}>{part.condition}</span>
                                 {part.shipping > 0 && <span className="text-[10px] text-zinc-500">+{fmt(part.shipping)} ship</span>}
                               </div>
+                              {part.note && <div className="text-[10px] text-zinc-600 mt-0.5 truncate">{part.note}</div>}
                             </div>
                             <div className="text-right shrink-0">
                               <div className="text-sm font-mono font-bold text-white">{part.price > 0 ? fmt(part.price) : "See price"}</div>
                               <a href={part.affiliate_url || part.url} target="_blank" rel="noopener noreferrer"
                                 className="inline-flex items-center gap-1 text-[10px] text-orange-400 hover:text-orange-300 font-semibold mt-0.5">
-                                Buy <ExternalLink className="w-2.5 h-2.5" />
+                                {part.price_source === "estimated" ? "Browse" : "Buy"} <ExternalLink className="w-2.5 h-2.5" />
                               </a>
                             </div>
                           </div>
