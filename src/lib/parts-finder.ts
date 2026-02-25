@@ -1,4 +1,5 @@
 import type { PartResult } from "./types";
+import { kvGetJSON, kvSetJSON } from "./kv";
 
 const EBAY_APP_ID = process.env.EBAY_APP_ID || "";
 const EBAY_AFFILIATE_ID = process.env.EBAY_AFFILIATE_ID || "";
@@ -234,7 +235,7 @@ export function getRockAutoBrowseResult(
   };
 }
 
-// ─── Multi-source search with in-memory cache + in-flight dedup ──────────────
+// ─── Multi-source search with KV cache + in-flight dedup ────────────────────
 
 export interface PartsSearchResult {
   part_name: string;
@@ -247,14 +248,28 @@ export interface PartsSearchResult {
   ebay_confidence?: PartResult["confidence"];
 }
 
-const LIVE_TTL = 12 * 60 * 60 * 1000; // 12h — eBay live data
-const EST_TTL  =  7 * 24 * 60 * 60 * 1000; // 7d  — estimated-only data
+// TTLs in seconds
+const TTL_LIVE = 60 * 60 * 12;  // 12h — eBay live data
+const TTL_EST  = 60 * 60 * 6;   // 6h  — estimated-only fallback
+const TTL_NONE = 60 * 60 * 1;   // 1h  — eBay returned no comps
 
-const partsCache = new Map<string, { result: PartsSearchResult; expiresAt: number }>();
-const inFlight   = new Map<string, Promise<PartsSearchResult>>();
+const inFlight = new Map<string, Promise<PartsSearchResult>>();
 
-function priceKey(year: string | number, make: string, model: string, partName: string): string {
-  return `parts:${year}:${make}:${model}:${partName}`.toLowerCase().replace(/\s+/g, "_");
+function normalizeKeyPart(value: string | number): string {
+  return String(value).toLowerCase().replace(/\s+/g, "").trim();
+}
+
+function buildCacheKey(
+  year: string | number,
+  make: string,
+  model: string,
+  partName: string
+): string {
+  return `parts:${normalizeKeyPart(year)}:${normalizeKeyPart(make)}:${normalizeKeyPart(model)}:${normalizeKeyPart(partName)}`;
+}
+
+function hasLivePrice(results: PartResult[]): boolean {
+  return results.some(r => r.price_source === "live");
 }
 
 async function _fetchParts(
@@ -309,11 +324,17 @@ async function _fetchParts(
     ebay_confidence: medianPrice > 0 ? confidence : undefined,
   };
 
-  const ttl = medianPrice > 0 ? LIVE_TTL : EST_TTL;
-  partsCache.set(priceKey(year, make, model, partName), {
-    result,
-    expiresAt: Date.now() + ttl,
-  });
+  // Determine TTL based on result quality
+  let ttlSeconds: number;
+  if (medianPrice > 0) {
+    ttlSeconds = TTL_LIVE;
+  } else if (hasLivePrice(allResults)) {
+    ttlSeconds = TTL_EST;
+  } else {
+    ttlSeconds = TTL_NONE;
+  }
+
+  await kvSetJSON(buildCacheKey(year, make, model, partName), result, ttlSeconds);
 
   return result;
 }
@@ -325,16 +346,15 @@ export async function findParts(
   model: string,
   damageId: string
 ): Promise<PartsSearchResult> {
-  const key = priceKey(year, make, model, partName);
+  const key = buildCacheKey(year, make, model, partName);
 
-  // Serve from cache if fresh
-  const cached = partsCache.get(key);
-  if (cached && Date.now() < cached.expiresAt) {
-    return { ...cached.result, cached: true };
+  // 1. Check KV cache (shared across all serverless instances)
+  const kvCached = await kvGetJSON<PartsSearchResult>(key);
+  if (kvCached) {
+    return { ...kvCached, cached: true };
   }
-  partsCache.delete(key);
 
-  // Deduplicate concurrent requests for the same part
+  // 2. Deduplicate concurrent requests within this instance
   if (inFlight.has(key)) {
     return inFlight.get(key)!;
   }
